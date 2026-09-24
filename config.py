@@ -5,9 +5,16 @@ TREND_CHANNEL_ID = int(os.getenv("TREND_CHANNEL_ID", 0))
 ALERT_ROLE_ID = int(os.getenv("ALERT_ROLE_ID", 0))
 CHECK_INTERVAL_HOURS = int(os.getenv("CHECK_INTERVAL_HOURS", 24))
 
-TRENDSMCP_API_KEY = os.getenv("TRENDSMCP_API_KEY")
-TRENDSMCP_URL = "https://api.trendsmcp.ai/api"
+# Social Trends API (Free tier available)
+SOCIAL_TRENDS_BASE = "https://tiktok-scraper.omkar.cloud"
+TIKTOK_MARKET = "us" # United States region
 
+# StockX Scraper API (Apify)
+APIFY_TOKEN = os.getenv("APIFY_TOKEN")
+STOCKX_ACTOR_ID = "crawlerbros~stockx-scraper"
+APIFY_BASE = "https://api.apify.com/v2"
+
+# Your watchlist for trend scanning
 BRANDS = [
     "Hellstar", "Chrome Hearts", "Supreme", "Bape", "Stussy",
     "Denim Tears", "Corteiz", "Trapstar", "Essentials Fear of God",
