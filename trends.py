@@ -7,13 +7,11 @@ from zoneinfo import ZoneInfo
 
 from config import (
     BRANDS, TIMEZONE, LOCATION_LABEL,
-    APIFY_TOKEN, APIFY_BASE,
-    TIKTOK_ACTOR, STOCKX_ACTOR, GRAILED_ACTOR,
+    APIFY_TOKEN, APIFY_BASE, TIKTOK_ACTOR, STOCKX_ACTOR, GRAILED_ACTOR,
 )
 
-
 async def run_actor(session, actor_id, payload, timeout=120):
-    """Run an Apify actor and return dataset items."""
+    """Run an Apify actor and return dataset items. Improved error logging."""
     url = f"{APIFY_BASE}/acts/{actor_id}/run-sync-get-dataset-items"
     params = {"token": APIFY_TOKEN}
     try:
@@ -21,50 +19,46 @@ async def run_actor(session, actor_id, payload, timeout=120):
             if resp.status in (200, 201):
                 return await resp.json()
             body = await resp.text()
-            print(f"[Apify] {actor_id} → HTTP {resp.status} · {body[:200]}")
+            print(f"[Apify Error] {actor_id} → HTTP {resp.status} · {body[:200]}")
     except Exception as e:
-        print(f"[Apify] {actor_id}: {e}")
+        print(f"[Apify Exception] {actor_id}: {e}")
     return []
 
-
 async def get_tiktok_trends(session):
-    """Search TikTok for each brand and get engagement data."""
-    results = {}
-    for brand in BRANDS[:10]:
+    """Search TikTok for each brand and get engagement data in parallel."""
+    async def fetch_brand(brand):
         payload = {
             "searchQueries": [brand],
             "resultsPerPage": 3,
             "maxItems": 3,
         }
         items = await run_actor(session, TIKTOK_ACTOR, payload, timeout=90)
-        if items:
-            results[brand] = items
-    return results
+        return brand, items
 
+    tasks = [fetch_brand(brand) for brand in BRANDS[:10]]
+    results = await asyncio.gather(*tasks)
+    return {brand: items for brand, items in results if items}
 
 async def get_stockx_prices(session, brand):
     """Get StockX resale prices for a brand."""
     payload = {
-        "searchQuery": brand,
+        "startUrls": [brand],
         "maxItems": 3,
         "country": "US",
         "currency": "USD",
     }
     return await run_actor(session, STOCKX_ACTOR, payload, timeout=90)
 
-
 async def get_grailed_sold(session, brand):
     """Get Grailed sold prices — the REAL market price."""
     payload = {
-        "query": brand,
-        "sort": "sold",
-        "maxItems": 5,
+        "keyword": brand,
+        "results_wanted": 3,
     }
     return await run_actor(session, GRAILED_ACTOR, payload, timeout=90)
 
-
 async def build_trend_report():
-    """Only runs when !trends is called."""
+    """Orchestrates data fetching. Only runs when !trends is called."""
     if not APIFY_TOKEN:
         print("[Trends] No APIFY_TOKEN set")
         return [], {}, {}
@@ -93,19 +87,21 @@ async def build_trend_report():
         top_brands = [b for b, _ in brand_scores.most_common(5)]
         price_data = {}
 
+        # Fetch StockX and Grailed for top brands in parallel
         for brand in top_brands:
-            stockx = await get_stockx_prices(session, brand)
-            grailed = await get_grailed_sold(session, brand)
+            stockx, grailed = await asyncio.gather(
+                get_stockx_prices(session, brand),
+                get_grailed_sold(session, brand)
+            )
             price_data[brand] = {
                 "stockx": stockx[:3] if stockx else [],
                 "grailed": grailed[:3] if grailed else [],
             }
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5) # Small delay between brands
 
         ranked = sorted(brand_scores.items(), key=lambda x: x[1], reverse=True)
         print(f"[Report] ranked={len(ranked)}")
         return ranked, examples, price_data
-
 
 def normalize_rating(score, top_score):
     if top_score <= 0:
@@ -116,7 +112,6 @@ def normalize_rating(score, top_score):
         r = (score / top_score) * 9.5
     return round(min(r, 9.8), 1)
 
-
 def rating_emoji(r):
     if r >= 8.5: return "🔥"
     if r >= 7.0: return "🚀"
@@ -124,8 +119,8 @@ def rating_emoji(r):
     if r >= 3.5: return "👀"
     return "💤"
 
-
 def format_report_embed(ranked, examples, price_data, top_n=8):
+    """Creates a clean, focused Discord embed."""
     now = datetime.now(ZoneInfo(TIMEZONE))
     top_score = ranked[0][1] if ranked else 1
 
