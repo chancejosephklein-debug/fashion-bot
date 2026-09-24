@@ -1,93 +1,124 @@
 import asyncio
 import aiohttp
-import os
 import math
 from collections import Counter
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from config import (
-    BRANDS, CHECK_INTERVAL_HOURS,
-    TIMEZONE, LOCATION_LABEL,
+    BRANDS, CHECK_INTERVAL_HOURS, TIMEZONE, LOCATION_LABEL,
+    TRENDSMCP_API_KEY, TRENDSMCP_URL,
 )
 
-TRENDSMCP_API_KEY = os.getenv("TRENDSMCP_API_KEY")
-TRENDSMCP_URL = "https://api.trendsmcp.ai/api"
+
+async def fetch_top_trends(session, feed_type, limit=100):
+    """Get live trending board for a feed type."""
+    body = {
+        "mode": "get_top_trends",
+        "type": feed_type,
+        "limit": limit,
+    }
+    headers = {
+        "Authorization": f"Bearer {TRENDSMCP_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    try:
+        async with session.post(TRENDSMCP_URL, headers=headers, json=body, timeout=30) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return data.get("data", [])
+            else:
+                print(f"[TrendsMCP] top_trends/{feed_type} → HTTP {resp.status}")
+    except Exception as e:
+        print(f"[TrendsMCP] top_trends/{feed_type}: {e}")
+    return []
 
 
-async def fetch_growth(session, keyword, sources, windows):
-    """Get growth % for a keyword across multiple sources. Counts as 1 request per source."""
-    results = {}
-    for source in sources:
-        body = {
-            "mode": "get_growth",
-            "source": source,
-            "keyword": keyword,
-            "percent_growth": windows,
-        }
-        headers = {
-            "Authorization": f"Bearer {TRENDSMCP_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        try:
-            async with session.post(
-                TRENDSMCP_URL, headers=headers, json=body, timeout=30
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    results[source] = data.get("results", [])
-                else:
-                    print(f"[TrendsMCP] {source}/{keyword} → HTTP {resp.status}")
-        except Exception as e:
-            print(f"[TrendsMCP] {source}/{keyword}: {e}")
-    return results
+async def fetch_trending_keywords(session, source, limit=100):
+    """Fallback: get trending keywords from a source."""
+    body = {
+        "mode": "get_trending_keywords",
+        "source": source,
+        "limit": limit,
+    }
+    headers = {
+        "Authorization": f"Bearer {TRENDSMCP_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    try:
+        async with session.post(TRENDSMCP_URL, headers=headers, json=body, timeout=30) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return data.get("data", [])
+            else:
+                print(f"[TrendsMCP] trending_keywords/{source} → HTTP {resp.status}")
+    except Exception as e:
+        print(f"[TrendsMCP] trending_keywords/{source}: {e}")
+    return []
+
+
+def extract_keyword(item):
+    """Normalize various response shapes into a single keyword string."""
+    if isinstance(item, str):
+        return item.lower()
+    if isinstance(item, list) and len(item) >= 2:
+        return str(item[1]).lower()
+    if isinstance(item, dict):
+        for k in ("keyword", "name", "title", "hashtag", "query", "term"):
+            if k in item:
+                return str(item[k]).lower()
+    return str(item).lower()
 
 
 async def build_trend_report():
-    """Query TrendsMCP for each brand across TikTok, Google, Instagram."""
-    sources = ["tiktok", "google search", "amazon"]
-    windows = ["7D", "30D"]
-
-    # Limit to 15 brands to stay under request budget
-    # 15 brands × 3 sources = 45 requests per scan
-    watchlist = BRANDS[:15]
+    """Get live trends and match against watchlist."""
+    feeds = [
+        "TikTok Trending Hashtags",
+        "Google Trends",
+        "TikTok Trending Sounds",
+    ]
 
     brand_data = Counter()
     examples = {}
+    raw_count = 0
 
     async with aiohttp.ClientSession() as session:
-        # Sequential with small delay to avoid rate limits
-        for brand in watchlist:
-            results = await fetch_growth(session, brand, sources, windows)
-            for source, rows in results.items():
-                for row in rows:
-                    growth = row.get("growth", 0) or 0
-                    direction = row.get("direction", "flat")
-                    period = row.get("period", "30D")
+        for feed in feeds:
+            items = await fetch_top_trends(session, feed, limit=100)
+            if not items:
+                items = await fetch_trending_keywords(session, feed.lower(), limit=100)
+            raw_count += len(items)
+            print(f"[Feed] {feed} → {len(items)} items")
 
-                    # Weight by source and window
-                    source_weight = {"tiktok": 1.5, "google search": 1.0, "amazon": 0.8}.get(source, 1.0)
-                    window_weight = {"7D": 1.5, "30D": 1.0}.get(period, 1.0)
+            for item in items:
+                keyword = extract_keyword(item)
+                for brand in BRANDS:
+                    if brand.lower() in keyword:
+                        brand_data[brand] += 10
+                        if brand not in examples:
+                            examples[brand] = {
+                                "title": f"Trending on {feed}: {keyword[:80]}",
+                                "url": "https://trendsmcp.ai",
+                                "score": 10,
+                                "subreddit": feed,
+                            }
 
-                    # Positive growth = score
-                    score = max(0, growth) * source_weight * window_weight
-                    brand_data[brand] += score
-
-                    if brand not in examples:
-                        examples[brand] = {
-                            "title": f"{brand} — {growth:+.0f}% on {source} ({period})",
-                            "url": f"https://trendsmcp.ai",
-                            "score": score,
-                            "subreddit": source,
-                        }
-            await asyncio.sleep(0.5)
+    # Fallback so report is never empty
+    if not brand_data:
+        print(f"[Report] no matches (raw items: {raw_count}), using fallback")
+        for brand in BRANDS[:10]:
+            brand_data[brand] = 1
+            examples[brand] = {
+                "title": f"{brand} — baseline (no live spike detected)",
+                "url": "https://trendsmcp.ai",
+                "score": 1,
+                "subreddit": "Baseline",
+            }
 
     ranked = sorted(brand_data.items(), key=lambda x: x[1], reverse=True)
-    print(f"[Report] ranked={len(ranked)} top={ranked[:3] if ranked else 'none'}")
+    print(f"[Report] ranked={len(ranked)} top={ranked[:3]}")
     return ranked, examples, {}, {}
 
-
-# ---- DISPLAY FUNCTIONS (unchanged from before) ----
 
 def normalize_rating(score, top_score):
     if top_score <= 0:
@@ -147,7 +178,11 @@ def format_report_embed(ranked, examples, reddit_scores, google_scores, top_n=10
         for brand, score in ranked[top_n:top_n+4]:
             r = normalize_rating(score, top_score)
             runners.append(f"`{r}` · **{brand}**")
-        fields.append({"name": "🎯 On the Radar", "value": "\n".join(runners), "inline": False})
+        fields.append({
+            "name": "🎯 On the Radar",
+            "value": "\n".join(runners),
+            "inline": False,
+        })
 
     hot_count = sum(1 for b, s in ranked[:top_n] if normalize_rating(s, top_score) >= 7.5)
     if hot_count >= 5:
