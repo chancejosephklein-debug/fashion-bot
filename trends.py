@@ -191,4 +191,4 @@ def detect_spikes(current, previous, threshold=5, min_rating=6.0):
         prev_pos = prev_map.get(brand)
         if prev_pos is not None and (prev_pos - i) >= threshold:
             spikes.append((brand, prev_pos - i, rating))
-    return spikes on
+    return spikes
