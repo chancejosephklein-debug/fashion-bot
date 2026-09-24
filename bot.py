@@ -3,7 +3,7 @@ from discord.ext import commands
 import aiohttp
 
 from config import DISCORD_TOKEN, ALERT_ROLE_ID
-from trends import build_trend_report, format_report_embed
+from trends import build_trend_report, format_report_embed, get_stockx_prices, get_grailed_sold
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -35,25 +35,32 @@ async def trends_cmd(ctx):
 @bot.command(name="price")
 async def price_cmd(ctx, *, item: str):
     """Quick price lookup. Usage: !price Hellstar hoodie"""
-    from trends import get_stockx_prices, get_grailed_sold
     msg = await ctx.send(f"🔍 Checking prices for **{item}**...")
     async with aiohttp.ClientSession() as session:
         stockx = await get_stockx_prices(session, item)
         grailed = await get_grailed_sold(session, item)
 
-    embed = discord.Embed(title=f"💸 {item}", color=0x00FF7F)
+    embed = discord.Embed(title=f"💸 Price Check: {item}", color=0x00FF7F)
+    
     if stockx:
+        stockx_lines = []
         for p in stockx[:3]:
             name = (p.get("title") or p.get("name") or "Unknown")[:80]
             ask = p.get("lowestAsk") or p.get("price") or "?"
-            embed.add_field(name=f"StockX: {name}", value=f"Lowest Ask: `${ask}`", inline=False)
+            stockx_lines.append(f"**{name}**\n  Lowest Ask: `${ask}`")
+        embed.add_field(name="💸 StockX", value="\n\n".join(stockx_lines), inline=False)
+    
     if grailed:
+        grailed_lines = []
         for g in grailed[:3]:
             name = (g.get("title") or g.get("name") or "Unknown")[:80]
             sold = g.get("soldPrice") or g.get("price") or "?"
-            embed.add_field(name=f"Grailed Sold: {name}", value=f"Price: `${sold}`", inline=False)
+            grailed_lines.append(f"**{name}**\n  Sold: `${sold}`")
+        embed.add_field(name="📊 Grailed (Sold)", value="\n\n".join(grailed_lines), inline=False)
+    
     if not stockx and not grailed:
         embed.description = "No results found. Try a different search."
+    
     await msg.edit(content=None, embed=embed)
 
 @bot.command(name="ping")
