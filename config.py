@@ -3,7 +3,7 @@ import os
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 TREND_CHANNEL_ID = int(os.getenv("TREND_CHANNEL_ID", 0))
 ALERT_ROLE_ID = int(os.getenv("ALERT_ROLE_ID", 0))
-CHECK_INTERVAL_HOURS = 6
+CHECK_INTERVAL_HOURS = 24
 
 BRANDS = [
     # Core hype brands
