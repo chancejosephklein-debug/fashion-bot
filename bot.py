@@ -60,7 +60,7 @@ async def on_ready():
         print(f"[Boot error] {e}")
 
 
-@tasks.loop(hours=CHECK_INTERVAL_HOURS)
+@tasks.loop(hours=CHECK_INTERVAL_HOURS=24)
 async def auto_scan():
     try:
         await post_report()
