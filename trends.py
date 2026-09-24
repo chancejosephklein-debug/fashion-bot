@@ -7,24 +7,28 @@ from zoneinfo import ZoneInfo
 
 from config import (
     BRANDS, TIMEZONE, LOCATION_LABEL,
-    APIFY_TOKEN, APIFY_BASE, TIKTOK_ACTOR, STOCKX_ACTOR, GRAILED_ACTOR,
+    APIFY_TOKEN, APIFY_BASE,
+    TIKTOK_ACTOR, STOCKX_ACTOR, GRAILED_ACTOR,
 )
 
 
 async def run_actor(session, actor_id, payload, timeout=120):
+    """Run an Apify actor and return dataset items."""
     url = f"{APIFY_BASE}/acts/{actor_id}/run-sync-get-dataset-items"
     params = {"token": APIFY_TOKEN}
     try:
         async with session.post(url, params=params, json=payload, timeout=timeout) as resp:
             if resp.status in (200, 201):
                 return await resp.json()
-            print(f"[Apify] {actor_id} → HTTP {resp.status}")
+            body = await resp.text()
+            print(f"[Apify] {actor_id} → HTTP {resp.status} · {body[:200]}")
     except Exception as e:
         print(f"[Apify] {actor_id}: {e}")
     return []
 
 
 async def get_tiktok_trends(session):
+    """Search TikTok for each brand and get engagement data."""
     results = {}
     for brand in BRANDS[:10]:
         payload = {
@@ -39,6 +43,7 @@ async def get_tiktok_trends(session):
 
 
 async def get_stockx_prices(session, brand):
+    """Get StockX resale prices for a brand."""
     payload = {
         "searchQuery": brand,
         "maxItems": 3,
@@ -49,6 +54,7 @@ async def get_stockx_prices(session, brand):
 
 
 async def get_grailed_sold(session, brand):
+    """Get Grailed sold prices — the REAL market price."""
     payload = {
         "query": brand,
         "sort": "sold",
@@ -58,12 +64,14 @@ async def get_grailed_sold(session, brand):
 
 
 async def build_trend_report():
+    """Only runs when !trends is called."""
     if not APIFY_TOKEN:
         print("[Trends] No APIFY_TOKEN set")
         return [], {}, {}
 
     async with aiohttp.ClientSession() as session:
         tiktok_data = await get_tiktok_trends(session)
+        print(f"[TikTok] got data for {len(tiktok_data)} brands")
 
         brand_scores = Counter()
         examples = {}
