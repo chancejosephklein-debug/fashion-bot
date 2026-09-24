@@ -6,6 +6,7 @@ ALERT_ROLE_ID = int(os.getenv("ALERT_ROLE_ID", 0))
 
 APIFY_TOKEN = os.getenv("APIFY_TOKEN")
 
+# ✅ CONFIRMED WORKING ACTOR IDs
 TIKTOK_ACTOR = "clockworks~tiktok-scraper"
 STOCKX_ACTOR = "xtracto~stockx-search-scraper"
 GRAILED_ACTOR = "shahidirfan~grailed-product-scraper"
