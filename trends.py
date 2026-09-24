@@ -1,124 +1,85 @@
 import asyncio
 import aiohttp
 import math
+import os
 from collections import Counter
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from config import (
     BRANDS, CHECK_INTERVAL_HOURS, TIMEZONE, LOCATION_LABEL,
-    TRENDSMCP_API_KEY, TRENDSMCP_URL,
+    SOCIAL_TRENDS_BASE, TIKTOK_MARKET,
+    APIFY_TOKEN, STOCKX_ACTOR_ID, APIFY_BASE
 )
 
+# ---------- TREND SCANNING ----------
 
-async def fetch_top_trends(session, feed_type, limit=100):
-    """Get live trending board for a feed type."""
-    body = {
-        "mode": "get_top_trends",
-        "type": feed_type,
-        "limit": limit,
-    }
-    headers = {
-        "Authorization": f"Bearer {TRENDSMCP_API_KEY}",
-        "Content-Type": "application/json",
-    }
+async def fetch_tiktok_trending(session, limit=30):
+    """Get trending videos from TikTok via omkar.cloud API (100 free/month)[citation:6]."""
+    url = f"{SOCIAL_TRENDS_BASE}/tiktok/videos/trending"
+    params = {"market": TIKTOK_MARKET, "max_results": limit}
     try:
-        async with session.post(TRENDSMCP_URL, headers=headers, json=body, timeout=30) as resp:
+        async with session.get(url, params=params, timeout=30) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                return data.get("data", [])
+                return data.get("data", []) or data.get("videos", [])
             else:
-                print(f"[TrendsMCP] top_trends/{feed_type} → HTTP {resp.status}")
+                print(f"[TikTok] HTTP {resp.status}")
     except Exception as e:
-        print(f"[TrendsMCP] top_trends/{feed_type}: {e}")
+        print(f"[TikTok] {e}")
     return []
 
 
-async def fetch_trending_keywords(session, source, limit=100):
-    """Fallback: get trending keywords from a source."""
-    body = {
-        "mode": "get_trending_keywords",
-        "source": source,
-        "limit": limit,
-    }
-    headers = {
-        "Authorization": f"Bearer {TRENDSMCP_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    try:
-        async with session.post(TRENDSMCP_URL, headers=headers, json=body, timeout=30) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return data.get("data", [])
-            else:
-                print(f"[TrendsMCP] trending_keywords/{source} → HTTP {resp.status}")
-    except Exception as e:
-        print(f"[TrendsMCP] trending_keywords/{source}: {e}")
-    return []
-
-
-def extract_keyword(item):
-    """Normalize various response shapes into a single keyword string."""
-    if isinstance(item, str):
-        return item.lower()
-    if isinstance(item, list) and len(item) >= 2:
-        return str(item[1]).lower()
-    if isinstance(item, dict):
-        for k in ("keyword", "name", "title", "hashtag", "query", "term"):
-            if k in item:
-                return str(item[k]).lower()
-    return str(item).lower()
+def extract_text_from_video(video):
+    """Pull caption/description text from a TikTok video object."""
+    if isinstance(video, dict):
+        for key in ("caption", "desc", "title", "text"):
+            if key in video and video[key]:
+                return str(video[key]).lower()
+    return ""
 
 
 async def build_trend_report():
-    """Get live trends and match against watchlist."""
-    feeds = [
-        "TikTok Trending Hashtags",
-        "Google Trends",
-        "TikTok Trending Sounds",
-    ]
+    """Scan TikTok trending videos and match against watchlist."""
+    async with aiohttp.ClientSession() as session:
+        videos = await fetch_tiktok_trending(session, limit=30)
+
+    print(f"[Feed] TikTok trending → {len(videos)} videos")
 
     brand_data = Counter()
     examples = {}
-    raw_count = 0
 
-    async with aiohttp.ClientSession() as session:
-        for feed in feeds:
-            items = await fetch_top_trends(session, feed, limit=100)
-            if not items:
-                items = await fetch_trending_keywords(session, feed.lower(), limit=100)
-            raw_count += len(items)
-            print(f"[Feed] {feed} → {len(items)} items")
-
-            for item in items:
-                keyword = extract_keyword(item)
-                for brand in BRANDS:
-                    if brand.lower() in keyword:
-                        brand_data[brand] += 10
-                        if brand not in examples:
-                            examples[brand] = {
-                                "title": f"Trending on {feed}: {keyword[:80]}",
-                                "url": "https://trendsmcp.ai",
-                                "score": 10,
-                                "subreddit": feed,
-                            }
+    for video in videos:
+        text = extract_text_from_video(video)
+        for brand in BRANDS:
+            if brand.lower() in text:
+                brand_data[brand] += 10
+                if brand not in examples:
+                    examples[brand] = {
+                        "title": text[:80] if text else f"{brand} trending on TikTok",
+                        "url": "https://tiktok.com",
+                        "score": 10,
+                        "source": "TikTok Trending"
+                    }
 
     # Fallback so report is never empty
     if not brand_data:
-        print(f"[Report] no matches (raw items: {raw_count}), using fallback")
+        print("[Report] No brand matches, using fallback")
         for brand in BRANDS[:10]:
             brand_data[brand] = 1
             examples[brand] = {
-                "title": f"{brand} — baseline (no live spike detected)",
+                "title": f"{brand} — baseline check",
                 "url": "https://trendsmcp.ai",
                 "score": 1,
-                "subreddit": "Baseline",
+                "source": "Baseline"
             }
 
     ranked = sorted(brand_data.items(), key=lambda x: x[1], reverse=True)
     print(f"[Report] ranked={len(ranked)} top={ranked[:3]}")
     return ranked, examples, {}, {}
 
+
+# ---------- RATINGS & DISPLAY ----------
 
 def normalize_rating(score, top_score):
     if top_score <= 0:
@@ -178,11 +139,7 @@ def format_report_embed(ranked, examples, reddit_scores, google_scores, top_n=10
         for brand, score in ranked[top_n:top_n+4]:
             r = normalize_rating(score, top_score)
             runners.append(f"`{r}` · **{brand}**")
-        fields.append({
-            "name": "🎯 On the Radar",
-            "value": "\n".join(runners),
-            "inline": False,
-        })
+        fields.append({"name": "🎯 On the Radar", "value": "\n".join(runners), "inline": False})
 
     hot_count = sum(1 for b, s in ranked[:top_n] if normalize_rating(s, top_score) >= 7.5)
     if hot_count >= 5:
