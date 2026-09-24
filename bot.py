@@ -11,31 +11,30 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
     print("Bot is ready. Run !trends to scan.")
 
-
 @bot.command(name="trends")
 async def trends_cmd(ctx):
+    """Manually trigger a trend scan."""
     msg = await ctx.send("🔎 Scanning TikTok + StockX + Grailed... (~60s)")
     try:
         ranked, examples, price_data = await build_trend_report()
         if not ranked:
-            await msg.edit(content="❌ No trend data. Check APIFY_TOKEN.")
+            await msg.edit(content="❌ No trend data found. Check APIFY_TOKEN and Apify credits.")
             return
         embed_data = format_report_embed(ranked, examples, price_data)
         await msg.edit(content=None, embed=discord.Embed.from_dict(embed_data))
         if ALERT_ROLE_ID:
             await ctx.send(f"<@&{ALERT_ROLE_ID}> scan complete")
     except Exception as e:
-        await msg.edit(content=f"❌ `{e}`")
-
+        await msg.edit(content=f"❌ An error occurred: `{e}`")
 
 @bot.command(name="price")
 async def price_cmd(ctx, *, item: str):
+    """Quick price lookup. Usage: !price Hellstar hoodie"""
     from trends import get_stockx_prices, get_grailed_sold
     msg = await ctx.send(f"🔍 Checking prices for **{item}**...")
     async with aiohttp.ClientSession() as session:
@@ -54,14 +53,12 @@ async def price_cmd(ctx, *, item: str):
             sold = g.get("soldPrice") or g.get("price") or "?"
             embed.add_field(name=f"Grailed Sold: {name}", value=f"Price: `${sold}`", inline=False)
     if not stockx and not grailed:
-        embed.description = "No results found."
+        embed.description = "No results found. Try a different search."
     await msg.edit(content=None, embed=embed)
-
 
 @bot.command(name="ping")
 async def ping_cmd(ctx):
     await ctx.send("🏓 Pong!")
-
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
