@@ -6,7 +6,7 @@ from config import (
     DISCORD_TOKEN, TREND_CHANNEL_ID, ALERT_ROLE_ID, CHECK_INTERVAL_HOURS
 )
 from trends import (
-    build_trend_report, format_report_embed, detect_spikes, get_local_time,
+    build_trend_report, format_report_embed, detect_spikes,
 )
 
 intents = discord.Intents.default()
