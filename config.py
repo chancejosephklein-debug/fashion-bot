@@ -6,9 +6,9 @@ ALERT_ROLE_ID = int(os.getenv("ALERT_ROLE_ID", 0))
 
 APIFY_TOKEN = os.getenv("APIFY_TOKEN")
 
-TIKTOK_ACTOR = "clockworks/tiktok-scraper"
-STOCKX_ACTOR = "xtracto/stockx-search-scraper"
-GRAILED_ACTOR = "shahidirfan/grailed-product-scraper"
+TIKTOK_ACTOR = "clockworks~tiktok-scraper"
+STOCKX_ACTOR = "xtracto~stockx-search-scraper"
+GRAILED_ACTOR = "shahidirfan~grailed-product-scraper"
 
 APIFY_BASE = "https://api.apify.com/v2"
 
