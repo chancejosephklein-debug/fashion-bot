@@ -3,7 +3,8 @@ from discord.ext import commands, tasks
 import asyncio
 
 from config import (
-    DISCORD_TOKEN, TREND_CHANNEL_ID, ALERT_ROLE_ID, CHECK_INTERVAL_HOURS
+    DISCORD_TOKEN, TREND_CHANNEL_ID, ALERT_ROLE_ID, CHECK_INTERVAL_HOURS,
+    TIMEZONE, LOCATION_LABEL,
 )
 from trends import (
     build_trend_report, format_report_embed, detect_spikes,
@@ -27,7 +28,7 @@ async def post_report():
     ranked, examples, reddit_scores, google_scores = await build_trend_report()
 
     if not ranked:
-        await channel.send("⚠️ No trend data this scan — Reddit may be rate-limiting. Will retry next cycle.")
+        await channel.send("⚠️ No trend data this scan. Will retry next cycle.")
         return
 
     spikes = detect_spikes(ranked, last_ranked)
@@ -75,7 +76,7 @@ async def before_scan():
 
 @bot.command(name="trends")
 async def trends_cmd(ctx):
-    await ctx.send("🔎 Scanning... (~20s)")
+    await ctx.send("🔎 Scanning trends... (~20s)")
     try:
         await post_report()
     except Exception as e:
@@ -84,7 +85,6 @@ async def trends_cmd(ctx):
 
 @bot.command(name="time")
 async def time_cmd(ctx):
-    from config import TIMEZONE, LOCATION_LABEL
     from datetime import datetime
     from zoneinfo import ZoneInfo
     now = datetime.now(ZoneInfo(TIMEZONE))
