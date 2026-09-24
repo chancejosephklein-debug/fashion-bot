@@ -11,7 +11,7 @@ from config import (
 )
 
 async def run_actor(session, actor_id, payload, timeout=120):
-    """Run an Apify actor and return dataset items. Improved error logging."""
+    """Run an Apify actor and return dataset items."""
     url = f"{APIFY_BASE}/acts/{actor_id}/run-sync-get-dataset-items"
     params = {"token": APIFY_TOKEN}
     try:
@@ -87,7 +87,6 @@ async def build_trend_report():
         top_brands = [b for b, _ in brand_scores.most_common(5)]
         price_data = {}
 
-        # Fetch StockX and Grailed for top brands in parallel
         for brand in top_brands:
             stockx, grailed = await asyncio.gather(
                 get_stockx_prices(session, brand),
@@ -97,7 +96,7 @@ async def build_trend_report():
                 "stockx": stockx[:3] if stockx else [],
                 "grailed": grailed[:3] if grailed else [],
             }
-            await asyncio.sleep(0.5) # Small delay between brands
+            await asyncio.sleep(0.5)
 
         ranked = sorted(brand_scores.items(), key=lambda x: x[1], reverse=True)
         print(f"[Report] ranked={len(ranked)}")
@@ -120,48 +119,80 @@ def rating_emoji(r):
     return "💤"
 
 def format_report_embed(ranked, examples, price_data, top_n=8):
-    """Creates a clean, focused Discord embed."""
+    """Creates a clean, professional Discord embed with proper spacing."""
     now = datetime.now(ZoneInfo(TIMEZONE))
     top_score = ranked[0][1] if ranked else 1
 
     medals = {0: "🥇", 1: "🥈", 2: "🥉"}
-    lines = []
+    
+    # Build a cleaner trend list with spacing between items
+    trend_lines = []
     for i, (brand, score) in enumerate(ranked[:top_n]):
         r = normalize_rating(score, top_score)
         marker = medals.get(i, f"`#{i+1:02d}`")
-        bar = "▰" * int(round(r / 1.25)) + "▱" * (8 - int(round(r / 1.25)))
-        lines.append(f"{marker} **{brand}** — `{r}/10` {bar} {rating_emoji(r)}")
-
-    description = "\n".join(lines)
+        # Fixed-width bar for alignment
+        bar_filled = int(round(r / 1.25))
+        bar = "▰" * bar_filled + "▱" * (8 - bar_filled)
+        trend_lines.append(
+            f"{marker} **{brand}**\n"
+            f"{rating_emoji(r)} `{r}/10` {bar}"
+        )
+    
+    # Join with double newlines for clear separation between entries
+    trend_description = "\n\n".join(trend_lines)
+    
     fields = []
 
+    # Top Signal section
     if ranked and ranked[0][0] in examples:
         ex = examples[ranked[0][0]]
         fields.append({
-            "name": f"💬 Top Signal — {ranked[0][0]}",
-            "value": f"[*{ex['title']}*]({ex['url']})\n*{ex['source']}*",
+            "name": "💬 Top Signal",
+            "value": f"**{ranked[0][0]}**\n[*\"{ex['title']}\"*]({ex['url']})\n*Source: {ex['source']}*",
             "inline": False,
         })
 
+    # Price data section - group StockX and Grailed together per brand
+    price_lines = []
     for brand in [b for b, _ in ranked[:3]]:
-        if brand in price_data and price_data[brand]["stockx"]:
-            p = price_data[brand]["stockx"][0]
-            name = (p.get("title") or p.get("name") or brand)[:60]
-            ask = p.get("lowestAsk") or p.get("price") or "?"
-            fields.append({
-                "name": f"💸 {brand} — StockX",
-                "value": f"**{name}**\nLowest Ask: `${ask}`",
-                "inline": True,
-            })
-        if brand in price_data and price_data[brand]["grailed"]:
-            g = price_data[brand]["grailed"][0]
-            name = (g.get("title") or g.get("name") or brand)[:60]
-            sold = g.get("soldPrice") or g.get("price") or "?"
-            fields.append({
-                "name": f"📊 {brand} — Grailed Sold",
-                "value": f"**{name}**\nSold: `${sold}`",
-                "inline": True,
-            })
+        if brand in price_data:
+            brand_lines = [f"**{brand}**"]
+            
+            if price_data[brand]["stockx"]:
+                p = price_data[brand]["stockx"][0]
+                name = (p.get("title") or p.get("name") or brand)[:60]
+                ask = p.get("lowestAsk") or p.get("price") or "?"
+                brand_lines.append(f"  💸 StockX: `${ask}` — *{name}*")
+            
+            if price_data[brand]["grailed"]:
+                g = price_data[brand]["grailed"][0]
+                name = (g.get("title") or g.get("name") or brand)[:60]
+                sold = g.get("soldPrice") or g.get("price") or "?"
+                brand_lines.append(f"  📊 Grailed Sold: `${sold}` — *{name}*")
+            
+            price_lines.append("\n".join(brand_lines))
+    
+    if price_lines:
+        fields.append({
+            "name": "💰 Live Market Data",
+            "value": "\n\n".join(price_lines),
+            "inline": False,
+        })
+
+    # Market summary
+    hot_count = sum(1 for b, s in ranked[:top_n] if normalize_rating(s, top_score) >= 7.0)
+    if hot_count >= 4:
+        market = "🔥 **Hot Market** — Multiple brands with strong momentum."
+    elif hot_count >= 2:
+        market = "📊 **Mixed Market** — A few clear opportunities."
+    else:
+        market = "💤 **Slow Market** — Limited activity right now."
+    
+    fields.append({
+        "name": "📈 Market Read",
+        "value": market,
+        "inline": False,
+    })
 
     top_r = normalize_rating(top_score, top_score)
     if top_r >= 8.5: color = 0xE74C3C
@@ -169,13 +200,13 @@ def format_report_embed(ranked, examples, price_data, top_n=8):
     elif top_r >= 5.5: color = 0xF1C40F
     else: color = 0x2ECC71
 
-    footer = now.strftime("%a %b %d · %-I:%M %p")
+    footer = now.strftime("%A, %B %d, %Y · %I:%M %p")
 
     return {
         "title": "🔥 Fashion Resale Trend Report",
-        "description": description,
+        "description": trend_description,
         "color": color,
         "fields": fields,
-        "footer": {"text": f"📍 {LOCATION_LABEL} · {footer} · run !trends to refresh"},
+        "footer": {"text": f"📍 {LOCATION_LABEL} · {footer} · Run !trends to refresh"},
         "timestamp": now.isoformat(),
     }
