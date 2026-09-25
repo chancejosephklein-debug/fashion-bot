@@ -10,37 +10,35 @@ from config import (
     APIFY_TOKEN, APIFY_BASE, TIKTOK_ACTOR, STOCKX_ACTOR, GRAILED_ACTOR,
 )
 
+
 async def run_actor(session, actor_id, payload, timeout=120):
-    """Run an Apify actor and return dataset items."""
+    """Run an Apify actor and return (items, ok)."""
     url = f"{APIFY_BASE}/acts/{actor_id}/run-sync-get-dataset-items"
     params = {"token": APIFY_TOKEN}
     try:
         async with session.post(url, params=params, json=payload, timeout=timeout) as resp:
             if resp.status in (200, 201):
-                return await resp.json()
+                return await resp.json(), True
             body = await resp.text()
-            print(f"[Apify Error] {actor_id} → HTTP {resp.status} · {body[:200]}")
+            print(f"[Apify Error] {actor_id} → HTTP {resp.status} · {body[:150]}")
+            return [], False
     except Exception as e:
         print(f"[Apify Exception] {actor_id}: {e}")
-    return []
+        return [], False
 
-async def get_tiktok_trends(session):
-    """Search TikTok for each brand and get engagement data in parallel."""
-    async def fetch_brand(brand):
-        payload = {
-            "searchQueries": [brand],
-            "resultsPerPage": 3,
-            "maxItems": 3,
-        }
-        items = await run_actor(session, TIKTOK_ACTOR, payload, timeout=90)
-        return brand, items
 
-    tasks = [fetch_brand(brand) for brand in BRANDS[:10]]
-    results = await asyncio.gather(*tasks)
-    return {brand: items for brand, items in results if items}
+async def fetch_tiktok(session, brand):
+    """Return (items, ok) for TikTok."""
+    payload = {
+        "searchQueries": [brand],
+        "resultsPerPage": 3,
+        "maxItems": 3,
+    }
+    return await run_actor(session, TIKTOK_ACTOR, payload, timeout=90)
 
-async def get_stockx_prices(session, brand):
-    """Get StockX resale prices for a brand."""
+
+async def fetch_stockx(session, brand):
+    """Return (items, ok) for StockX."""
     payload = {
         "startUrls": [brand],
         "maxItems": 3,
@@ -49,58 +47,116 @@ async def get_stockx_prices(session, brand):
     }
     return await run_actor(session, STOCKX_ACTOR, payload, timeout=90)
 
-async def get_grailed_sold(session, brand):
-    """Get Grailed sold prices — the REAL market price."""
+
+async def fetch_grailed(session, brand):
+    """Return (items, ok) for Grailed."""
     payload = {
         "keyword": brand,
         "results_wanted": 3,
     }
     return await run_actor(session, GRAILED_ACTOR, payload, timeout=90)
 
+
+def safe_price(val):
+    """Return a clean $ string or None."""
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        if f <= 0:
+            return None
+        return f"${f:,.0f}"
+    except (TypeError, ValueError):
+        return None
+
+
 async def build_trend_report():
-    """Orchestrates data fetching. Only runs when !trends is called."""
+    """
+    Returns:
+        ranked: list of (brand, score, product_name, source_flags)
+        price_data: dict brand -> {stockx_ask, grailed_sold, sample_title}
+        sources_ok: dict of source -> bool
+    """
     if not APIFY_TOKEN:
         print("[Trends] No APIFY_TOKEN set")
-        return [], {}, {}
+        return [], {}, {"tiktok": False, "stockx": False, "grailed": False}
+
+    sources_ok = {"tiktok": False, "stockx": False, "grailed": False}
+    price_data = {}
+    brand_scores = Counter()
+    brand_products = {}
 
     async with aiohttp.ClientSession() as session:
-        tiktok_data = await get_tiktok_trends(session)
-        print(f"[TikTok] got data for {len(tiktok_data)} brands")
+        # ---- TikTok scan (parallel) ----
+        tt_tasks = [fetch_tiktok(session, b) for b in BRANDS[:10]]
+        tt_results = await asyncio.gather(*tt_tasks)
 
-        brand_scores = Counter()
-        examples = {}
+        any_tt_ok = False
+        tiktok_hits = []
+        for brand, (items, ok) in zip(BRANDS[:10], tt_results):
+            if ok:
+                any_tt_ok = True
+            if items:
+                tiktok_hits.append((brand, items))
 
-        for brand, videos in tiktok_data.items():
+        sources_ok["tiktok"] = any_tt_ok
+
+        for brand, videos in tiktok_hits:
             total = 0
+            top_title = None
+            top_engagement = 0
             for v in videos:
                 play = v.get("playCount", 0) or 0
                 like = v.get("diggCount", 0) or 0
-                total += play + (like * 2)
+                eng = play + (like * 2)
+                total += eng
+                if eng > top_engagement:
+                    top_engagement = eng
+                    top_title = (v.get("text") or "")[:70] or None
             brand_scores[brand] = total
-            if videos:
-                examples[brand] = {
-                    "title": (videos[0].get("text") or f"{brand} on TikTok")[:100],
-                    "url": videos[0].get("webVideoUrl", "https://tiktok.com"),
-                    "source": "TikTok",
-                }
+            brand_products[brand] = top_title
 
+        # ---- Price lookups for top brands (parallel) ----
         top_brands = [b for b, _ in brand_scores.most_common(5)]
-        price_data = {}
 
-        for brand in top_brands:
-            stockx, grailed = await asyncio.gather(
-                get_stockx_prices(session, brand),
-                get_grailed_sold(session, brand)
-            )
+        async def get_prices(brand):
+            stockx_items, sx_ok = await fetch_stockx(session, brand)
+            grailed_items, gr_ok = await fetch_grailed(session, brand)
+            return brand, stockx_items, sx_ok, grailed_items, gr_ok
+
+        price_results = await asyncio.gather(*[get_prices(b) for b in top_brands])
+
+        for brand, stockx_items, sx_ok, grailed_items, gr_ok in price_results:
+            if sx_ok:
+                sources_ok["stockx"] = True
+            if gr_ok:
+                sources_ok["grailed"] = True
+
+            sx_ask = None
+            sx_title = None
+            if stockx_items:
+                p = stockx_items[0]
+                sx_ask = safe_price(p.get("lowestAsk") or p.get("price"))
+                sx_title = (p.get("title") or p.get("name") or "")[:60] or None
+
+            gr_sold = None
+            gr_title = None
+            if grailed_items:
+                g = grailed_items[0]
+                gr_sold = safe_price(g.get("soldPrice") or g.get("price"))
+                gr_title = (g.get("title") or g.get("name") or "")[:60] or None
+
             price_data[brand] = {
-                "stockx": stockx[:3] if stockx else [],
-                "grailed": grailed[:3] if grailed else [],
+                "stockx_ask": sx_ask,
+                "stockx_title": sx_title,
+                "grailed_sold": gr_sold,
+                "grailed_title": gr_title,
             }
-            await asyncio.sleep(0.5)
 
         ranked = sorted(brand_scores.items(), key=lambda x: x[1], reverse=True)
-        print(f"[Report] ranked={len(ranked)}")
-        return ranked, examples, price_data
+        print(f"[Report] ranked={len(ranked)} sources={sources_ok}")
+        return ranked, (brand_products, price_data), sources_ok
+
 
 def normalize_rating(score, top_score):
     if top_score <= 0:
@@ -111,102 +167,119 @@ def normalize_rating(score, top_score):
         r = (score / top_score) * 9.5
     return round(min(r, 9.8), 1)
 
-def rating_emoji(r):
-    if r >= 8.5: return "🔥"
-    if r >= 7.0: return "🚀"
-    if r >= 5.5: return "📈"
-    if r >= 3.5: return "👀"
-    return "💤"
 
-def format_report_embed(ranked, examples, price_data, top_n=8):
-    """Creates a clean, professional Discord embed with proper spacing."""
+def progress_bar(value, max_val, length=10):
+    if max_val <= 0:
+        return "░" * length
+    filled = int(round((value / max_val) * length))
+    filled = max(0, min(length, filled))
+    return "█" * filled + "░" * (length - filled)
+
+
+def fmt_price(p):
+    return p if p else "DATA UNAVAILABLE"
+
+
+def format_report_embed(ranked, extra, sources_ok, top_n=8):
+    brand_products, price_data = extra
     now = datetime.now(ZoneInfo(TIMEZONE))
     top_score = ranked[0][1] if ranked else 1
 
-    medals = {0: "🥇", 1: "🥈", 2: "🥉"}
-    
-    # Build a cleaner trend list with spacing between items
-    trend_lines = []
-    for i, (brand, score) in enumerate(ranked[:top_n]):
-        r = normalize_rating(score, top_score)
-        marker = medals.get(i, f"`#{i+1:02d}`")
-        # Fixed-width bar for alignment
-        bar_filled = int(round(r / 1.25))
-        bar = "▰" * bar_filled + "▱" * (8 - bar_filled)
-        trend_lines.append(
-            f"{marker} **{brand}**\n"
-            f"{rating_emoji(r)} `{r}/10` {bar}"
-        )
-    
-    # Join with double newlines for clear separation between entries
-    trend_description = "\n\n".join(trend_lines)
-    
+    # ── Header block ──
+    header = (
+        "```\n"
+        "FASHIONFLIP\n"
+        "MARKET INTELLIGENCE\n"
+        "● LIVE SCAN\n"
+        "```"
+    )
+
+    # ── Source status line ──
+    def src_icon(ok):
+        return "✓" if ok else "⚠"
+    source_line = (
+        f"`TIKTOK {src_icon(sources_ok['tiktok'])}  ·  "
+        f"STOCKX {src_icon(sources_ok['stockx'])}  ·  "
+        f"GRAILED {src_icon(sources_ok['grailed'])}`"
+    )
+
+    # ── Top signal ──
     fields = []
 
-    # Top Signal section
-    if ranked and ranked[0][0] in examples:
-        ex = examples[ranked[0][0]]
-        fields.append({
-            "name": "💬 Top Signal",
-            "value": f"**{ranked[0][0]}**\n[*\"{ex['title']}\"*]({ex['url']})\n*Source: {ex['source']}*",
-            "inline": False,
-        })
+    if ranked:
+        top_brand = ranked[0][0]
+        top_r = normalize_rating(ranked[0][1], top_score)
+        top_product = brand_products.get(top_brand) or "—"
+        top_bar = progress_bar(top_r, 10, 14)
 
-    # Price data section - group StockX and Grailed together per brand
+        top_block = (
+            f"**{top_brand.upper()}**\n"
+            f"*{top_product}*\n\n"
+            f"`{top_r} / 10`  {top_bar}\n"
+            f"**TOP SIGNAL** · HIGH ENGAGEMENT"
+        )
+        fields.append({"name": "▎ #01 — TOP SIGNAL", "value": top_block, "inline": False})
+
+    # ── Rankings ──
+    if len(ranked) > 1:
+        lines = []
+        for i, (brand, score) in enumerate(ranked[1:top_n], start=2):
+            r = normalize_rating(score, top_score)
+            bar = progress_bar(r, 10, 10)
+            product = brand_products.get(brand)
+            product_line = f"\n      *{product}*" if product else ""
+            lines.append(f"`{i:02d}` **{brand.upper()}**{product_line}\n      `{r}` {bar}")
+        fields.append({"name": "▎ RANKINGS", "value": "\n\n".join(lines), "inline": False})
+
+    # ── Live market data ──
     price_lines = []
     for brand in [b for b, _ in ranked[:3]]:
-        if brand in price_data:
-            brand_lines = [f"**{brand}**"]
-            
-            if price_data[brand]["stockx"]:
-                p = price_data[brand]["stockx"][0]
-                name = (p.get("title") or p.get("name") or brand)[:60]
-                ask = p.get("lowestAsk") or p.get("price") or "?"
-                brand_lines.append(f"  💸 StockX: `${ask}` — *{name}*")
-            
-            if price_data[brand]["grailed"]:
-                g = price_data[brand]["grailed"][0]
-                name = (g.get("title") or g.get("name") or brand)[:60]
-                sold = g.get("soldPrice") or g.get("price") or "?"
-                brand_lines.append(f"  📊 Grailed Sold: `${sold}` — *{name}*")
-            
-            price_lines.append("\n".join(brand_lines))
-    
+        pd = price_data.get(brand, {})
+        block = [f"**{brand.upper()}**"]
+        block.append(f"StockX ask   ·  {fmt_price(pd.get('stockx_ask'))}")
+        block.append(f"Grailed sold ·  {fmt_price(pd.get('grailed_sold'))}")
+        price_lines.append("\n".join(block))
+
     if price_lines:
         fields.append({
-            "name": "💰 Live Market Data",
+            "name": "▎ LIVE MARKET DATA",
             "value": "\n\n".join(price_lines),
             "inline": False,
         })
 
-    # Market summary
-    hot_count = sum(1 for b, s in ranked[:top_n] if normalize_rating(s, top_score) >= 7.0)
-    if hot_count >= 4:
-        market = "🔥 **Hot Market** — Multiple brands with strong momentum."
-    elif hot_count >= 2:
-        market = "📊 **Mixed Market** — A few clear opportunities."
-    else:
-        market = "💤 **Slow Market** — Limited activity right now."
-    
-    fields.append({
-        "name": "📈 Market Read",
-        "value": market,
-        "inline": False,
-    })
+    # ── Data sources ──
+    src_block = "\n".join([
+        f"TikTok          {src_icon(sources_ok['tiktok'])}",
+        f"StockX          {src_icon(sources_ok['stockx'])}",
+        f"Grailed         {src_icon(sources_ok['grailed'])}",
+        f"Google Trends   ⚠",
+    ])
+    fields.append({"name": "▎ DATA SOURCES", "value": f"```\n{src_block}\n```", "inline": False})
 
+    # ── Color by top rating ──
     top_r = normalize_rating(top_score, top_score)
-    if top_r >= 8.5: color = 0xE74C3C
-    elif top_r >= 7.0: color = 0xE67E22
-    elif top_r >= 5.5: color = 0xF1C40F
-    else: color = 0x2ECC71
+    if top_r >= 8.5:
+        color = 0xC0392B
+    elif top_r >= 7.0:
+        color = 0xD35400
+    elif top_r >= 5.5:
+        color = 0xF39C12
+    else:
+        color = 0x7F8C8D
 
-    footer = now.strftime("%A, %B %d, %Y · %I:%M %p")
+    scan_time = now.strftime("%d %b %Y · %I:%M %p")
+    sources_count = sum(1 for v in sources_ok.values() if v)
 
     return {
-        "title": "🔥 Fashion Resale Trend Report",
-        "description": trend_description,
+        "title": None,
+        "description": header + "\n" + source_line,
         "color": color,
         "fields": fields,
-        "footer": {"text": f"📍 {LOCATION_LABEL} · {footer} · Run !trends to refresh"},
+        "footer": {
+            "text": (
+                f"SCAN COMPLETE · {scan_time} · "
+                f"Sources: {sources_count}/3 · Products: {len(ranked)}"
+            )
+        },
         "timestamp": now.isoformat(),
     }
