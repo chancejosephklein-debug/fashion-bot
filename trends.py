@@ -28,7 +28,6 @@ async def run_actor(session, actor_id, payload, timeout=120):
 
 
 async def fetch_tiktok(session, brand):
-    """Return (items, ok) for TikTok."""
     payload = {
         "searchQueries": [brand],
         "resultsPerPage": 3,
@@ -38,7 +37,6 @@ async def fetch_tiktok(session, brand):
 
 
 async def fetch_stockx(session, brand):
-    """Return (items, ok) for StockX."""
     payload = {
         "startUrls": [brand],
         "maxItems": 3,
@@ -49,7 +47,6 @@ async def fetch_stockx(session, brand):
 
 
 async def fetch_grailed(session, brand):
-    """Return (items, ok) for Grailed."""
     payload = {
         "keyword": brand,
         "results_wanted": 3,
@@ -70,16 +67,20 @@ def safe_price(val):
         return None
 
 
+def fmt_price(p):
+    return p if p else "DATA UNAVAILABLE"
+
+
 async def build_trend_report():
     """
     Returns:
-        ranked: list of (brand, score, product_name, source_flags)
-        price_data: dict brand -> {stockx_ask, grailed_sold, sample_title}
+        ranked: list of (brand, score)
+        extra: (brand_products dict, price_data dict)
         sources_ok: dict of source -> bool
     """
     if not APIFY_TOKEN:
         print("[Trends] No APIFY_TOKEN set")
-        return [], {}, {"tiktok": False, "stockx": False, "grailed": False}
+        return [], ({}, {}), {"tiktok": False, "stockx": False, "grailed": False}
 
     sources_ok = {"tiktok": False, "stockx": False, "grailed": False}
     price_data = {}
@@ -176,16 +177,11 @@ def progress_bar(value, max_val, length=10):
     return "█" * filled + "░" * (length - filled)
 
 
-def fmt_price(p):
-    return p if p else "DATA UNAVAILABLE"
-
-
 def format_report_embed(ranked, extra, sources_ok, top_n=8):
     brand_products, price_data = extra
     now = datetime.now(ZoneInfo(TIMEZONE))
     top_score = ranked[0][1] if ranked else 1
 
-    # ── Header block ──
     header = (
         "```\n"
         "FASHIONFLIP\n"
@@ -194,18 +190,18 @@ def format_report_embed(ranked, extra, sources_ok, top_n=8):
         "```"
     )
 
-    # ── Source status line ──
     def src_icon(ok):
         return "✓" if ok else "⚠"
+
     source_line = (
         f"`TIKTOK {src_icon(sources_ok['tiktok'])}  ·  "
         f"STOCKX {src_icon(sources_ok['stockx'])}  ·  "
         f"GRAILED {src_icon(sources_ok['grailed'])}`"
     )
 
-    # ── Top signal ──
     fields = []
 
+    # Top signal
     if ranked:
         top_brand = ranked[0][0]
         top_r = normalize_rating(ranked[0][1], top_score)
@@ -216,11 +212,11 @@ def format_report_embed(ranked, extra, sources_ok, top_n=8):
             f"**{top_brand.upper()}**\n"
             f"*{top_product}*\n\n"
             f"`{top_r} / 10`  {top_bar}\n"
-            f"**TOP SIGNAL** · HIGH ENGAGEMENT"
+            f"**TOP SIGNAL · HIGH ENGAGEMENT**"
         )
         fields.append({"name": "▎ #01 — TOP SIGNAL", "value": top_block, "inline": False})
 
-    # ── Rankings ──
+    # Rankings
     if len(ranked) > 1:
         lines = []
         for i, (brand, score) in enumerate(ranked[1:top_n], start=2):
@@ -231,7 +227,7 @@ def format_report_embed(ranked, extra, sources_ok, top_n=8):
             lines.append(f"`{i:02d}` **{brand.upper()}**{product_line}\n      `{r}` {bar}")
         fields.append({"name": "▎ RANKINGS", "value": "\n\n".join(lines), "inline": False})
 
-    # ── Live market data ──
+    # Live market data
     price_lines = []
     for brand in [b for b, _ in ranked[:3]]:
         pd = price_data.get(brand, {})
@@ -247,7 +243,7 @@ def format_report_embed(ranked, extra, sources_ok, top_n=8):
             "inline": False,
         })
 
-    # ── Data sources ──
+    # Data sources
     src_block = "\n".join([
         f"TikTok          {src_icon(sources_ok['tiktok'])}",
         f"StockX          {src_icon(sources_ok['stockx'])}",
@@ -256,7 +252,6 @@ def format_report_embed(ranked, extra, sources_ok, top_n=8):
     ])
     fields.append({"name": "▎ DATA SOURCES", "value": f"```\n{src_block}\n```", "inline": False})
 
-    # ── Color by top rating ──
     top_r = normalize_rating(top_score, top_score)
     if top_r >= 8.5:
         color = 0xC0392B
